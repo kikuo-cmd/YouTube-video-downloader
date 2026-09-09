@@ -1,65 +1,83 @@
 const express = require('express');
 const cors = require('cors');
-const ytdl = require('@distube/ytdl-core');
+const path = require('path');
+const ytDlp = require('yt-dlp-exec');
+const { spawn } = require('child_process');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// CORS許可設定（フロントエンドからのリクエストを受け付ける）
 app.use(cors());
 app.use(express.json());
 
-// サーバー動作確認用ルート
+// 静的ファイル（index.html等）を配信する設定
+app.use(express.static(__dirname));
+
+// トップページにアクセスしたら index.html を表示
 app.get('/', (req, res) => {
-  res.send('YouTube Downloader API is running!');
+  res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// 動画情報取得エンドポイント
+// 動画情報取得 API
 app.get('/api/info', async (req, res) => {
   try {
     const videoURL = req.query.url;
-    if (!videoURL || !ytdl.validateURL(videoURL)) {
-      return res.status(400).json({ error: '有効なYouTube URLを指定してください。' });
+    if (!videoURL) {
+      return res.status(400).json({ error: 'URLを指定してください。' });
     }
 
-    const info = await ytdl.getInfo(videoURL);
-    const title = info.videoDetails.title;
-    const thumbnail = info.videoDetails.thumbnails.slice(-1)[0].url;
+    const output = await ytDlp(videoURL, {
+      dumpSingleJson: true,
+      noWarnings: true,
+      noCallHome: true,
+      noCheckCertificate: true,
+      preferFreeFormats: true,
+      youtubeSkipDashManifest: true
+    });
 
-    res.json({ title, thumbnail });
+    res.json({
+      title: output.title,
+      thumbnail: output.thumbnail
+    });
   } catch (error) {
     console.error('Info Error:', error);
     res.status(500).json({ error: '動画情報の取得に失敗しました。' });
   }
 });
 
-// 動画ダウンロードエンドポイント
-app.get('/api/download', async (req, res) => {
-  try {
-    const videoURL = req.query.url;
-    if (!videoURL || !ytdl.validateURL(videoURL)) {
-      return res.status(400).send('有効なYouTube URLを指定してください。');
-    }
-
-    const info = await ytdl.getInfo(videoURL);
-    // ファイル名に使用できない記号を除去
-    const rawTitle = info.videoDetails.title.replace(/[^\w\s-]/gi, '');
-    const filename = encodeURIComponent(rawTitle || 'video') + '.mp4';
-
-    // ダウンロード用ヘッダーの出力設定
-    res.header('Content-Disposition', `attachment; filename="${filename}"`);
-    res.header('Content-Type', 'video/mp4');
-
-    // 動画ストリームをレスポンスに直接パイプ出力
-    ytdl(videoURL, {
-      quality: 'highestvideo',
-      filter: 'audioandvideo'
-    }).pipe(res);
-
-  } catch (error) {
-    console.error('Download Error:', error);
-    res.status(500).send('ダウンロード処理中にエラーが発生しました。');
+// 動画ダウンロード API
+app.get('/api/download', (req, res) => {
+  const videoURL = req.query.url;
+  if (!videoURL) {
+    return res.status(400).send('URLを指定してください。');
   }
+
+  res.header('Content-Disposition', 'attachment; filename="video.mp4"');
+  res.header('Content-Type', 'video/mp4');
+
+  // yt-dlp プロセスを実行し、標準出力を直接レスポンスへ流し込む
+  const ytProcess = spawn('yt-dlp', [
+    '-f', 'b[ext=mp4]/best[ext=mp4]/best',
+    '-o', '-',
+    videoURL
+  ]);
+
+  ytProcess.stdout.pipe(res);
+
+  ytProcess.stderr.on('data', (data) => {
+    console.error(`yt-dlp stderr: ${data}`);
+  });
+
+  ytProcess.on('close', (code) => {
+    if (code !== 0) {
+      console.error(`yt-dlp process exited with code ${code}`);
+    }
+  });
+
+  // 通信が途中で切断された場合にプロセスを終了
+  req.on('close', () => {
+    ytProcess.kill();
+  });
 });
 
 app.listen(PORT, () => {
